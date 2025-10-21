@@ -246,6 +246,9 @@ private:
   /** @brief Final desired torque command */
   Eigen::VectorXd tau_d;
 
+  /** @brief Cached joint IDs for fast lookup in update() */
+  std::vector<pinocchio::JointIndex> joint_ids_;
+
   /**
    * @brief Log debug information based on parameter settings
    * @param time Current time for throttling logs

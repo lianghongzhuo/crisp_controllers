@@ -56,15 +56,10 @@ CartesianController::update(const rclcpp::Time &time,
   size_t num_joints = params_.joints.size();
   for (size_t i = 0; i < num_joints; i++) {
 
-    // TODO: later it might be better to get this thing prepared in the
-    // configuration part (not in the control loop)
-    auto joint_name = params_.joints[i];
-    auto joint_id =
-        model_.getJointId(joint_name); // pinocchio joind id might be different
+    // Use pre-computed joint IDs (cached in on_configure)
+    auto joint_id = joint_ids_[i];
     auto joint = model_.joints[joint_id];
 
-    /*q[i] = exponential_moving_average(q[i], state_interfaces_[i].get_value(),*/
-    /*                                  params_.filter.q);*/
     q[i] = state_interfaces_[i].get_value();
     if (continous_joint_types.count(
                    joint.shortname())) { // Then we are handling a continous
@@ -74,9 +69,6 @@ CartesianController::update(const rclcpp::Time &time,
     } else {  // simple revolute joint case
       q_pin[joint.idx_q()] = q[i];
     }
-    /*dq[i] = exponential_moving_average(*/
-    /*    dq[i], state_interfaces_[num_joints + i].get_value(),*/
-    /*    params_.filter.dq);*/
     dq[i] = state_interfaces_[num_joints + i].get_value();
   }
 
@@ -208,9 +200,9 @@ CartesianController::update(const rclcpp::Time &time,
 
   tau_previous = tau_d;
 
-  params_listener_->refresh_dynamic_parameters();
-  params_ = params_listener_->get_params();
-  setStiffnessAndDamping();
+  // params_listener_->refresh_dynamic_parameters();
+  // params_ = params_listener_->get_params();
+  // setStiffnessAndDamping();
 
   log_debug_info(time);
 
@@ -316,6 +308,13 @@ CallbackReturn CartesianController::on_configure(
   tau_previous = Eigen::VectorXd::Zero(model_.nv);
   J = Eigen::MatrixXd::Zero(6, model_.nv);
 
+  // Pre-compute joint IDs to avoid string lookup in update()
+  joint_ids_.clear();
+  joint_ids_.reserve(params_.joints.size());
+  for (const auto &joint_name : params_.joints) {
+    joint_ids_.push_back(model_.getJointId(joint_name));
+  }
+
   // Map the friction parameters to Eigen vectors
   fp1 = Eigen::Map<Eigen::VectorXd>(params_.friction.fp1.data(), model_.nv);
   fp2 = Eigen::Map<Eigen::VectorXd>(params_.friction.fp2.data(), model_.nv);
@@ -323,6 +322,18 @@ CallbackReturn CartesianController::on_configure(
 
   nullspace_stiffness = Eigen::MatrixXd::Zero(model_.nv, model_.nv);
   nullspace_damping = Eigen::MatrixXd::Zero(model_.nv, model_.nv);
+
+  // Validate nullspace projector type (to avoid check in real-time loop)
+  if (params_.nullspace.projector_type != "dynamic" &&
+      params_.nullspace.projector_type != "kinematic" &&
+      params_.nullspace.projector_type != "none") {
+    RCLCPP_ERROR_STREAM(get_node()->get_logger(),
+                        "Invalid nullspace projector type: '"
+                            << params_.nullspace.projector_type
+                            << "'. Must be 'dynamic', 'kinematic', or 'none'. "
+                            << "Using 'kinematic' as fallback.");
+    params_.nullspace.projector_type = "kinematic";
+  }
 
   setStiffnessAndDamping();
 
@@ -449,11 +460,8 @@ CallbackReturn CartesianController::on_activate(
   auto num_joints = params_.joints.size();
   for (size_t i = 0; i < num_joints; i++) {
 
-    // TODO: later it might be better to get this thing prepared in the
-    // configuration part (not in the control loop)
-    auto joint_name = params_.joints[i];
-    auto joint_id =
-        model_.getJointId(joint_name); // pinocchio joind id might be different
+    // Use pre-computed joint IDs (cached in on_configure)
+    auto joint_id = joint_ids_[i];
     auto joint = model_.joints[joint_id];
 
     q[i] = state_interfaces_[i].get_value();
