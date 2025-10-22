@@ -243,6 +243,12 @@ private:
   /** @brief Cached joint IDs for fast lookup in update() */
   std::vector<pinocchio::JointIndex> joint_ids_;
 
+  /** @brief Pre-allocated matrices to avoid dynamic allocation in update() */
+  Eigen::MatrixXd J_pinv_;
+  Eigen::MatrixXd Id_nv_;
+  Eigen::MatrixXd Mx_;
+  Eigen::MatrixXd Mx_inv_;
+
   /**
    * @brief Log debug information based on parameter settings
    * @param time Current time for throttling logs

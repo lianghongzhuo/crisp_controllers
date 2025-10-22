@@ -118,20 +118,18 @@ CartesianController::update(const rclcpp::Time &time,
   pinocchio::computeFrameJacobian(model_, data_, q_pin, end_effector_frame_id,
                                   reference_frame, J);
 
-  Eigen::MatrixXd J_pinv(model_.nv, 6);
-  J_pinv = pseudo_inverse(J, params_.nullspace.regularization);
-  Eigen::MatrixXd Id_nv = Eigen::MatrixXd::Identity(model_.nv, model_.nv);
+  J_pinv_ = pseudo_inverse(J, params_.nullspace.regularization);
 
   if (params_.nullspace.projector_type == "dynamic") {
     pinocchio::computeMinverse(model_, data_, q_pin);
-    auto Mx_inv = J * data_.Minv * J.transpose();
-    auto Mx = pseudo_inverse(Mx_inv);
-    auto J_bar = data_.Minv * J.transpose() * Mx;
-    nullspace_projection = Id_nv - J.transpose() * J_bar.transpose();
+    Mx_inv_.noalias() = J * data_.Minv * J.transpose();
+    Mx_ = pseudo_inverse(Mx_inv_);
+    auto J_bar = data_.Minv * J.transpose() * Mx_;
+    nullspace_projection.noalias() = Id_nv_ - J.transpose() * J_bar.transpose();
   } else if (params_.nullspace.projector_type == "kinematic") {
-    nullspace_projection = Id_nv - J_pinv * J;
+    nullspace_projection.noalias() = Id_nv_ - J_pinv_ * J;
   } else if (params_.nullspace.projector_type == "none") {
-    nullspace_projection = Eigen::MatrixXd::Identity(model_.nv, model_.nv);
+    nullspace_projection = Id_nv_;
   } else {
     RCLCPP_ERROR_STREAM_ONCE(get_node()->get_logger(),
                         "Unknown nullspace projector type: "
@@ -140,14 +138,16 @@ CartesianController::update(const rclcpp::Time &time,
   }
 
   if (params_.use_operational_space) {
+    // Reuse Minverse if already computed for dynamic nullspace projector
+    if (params_.nullspace.projector_type != "dynamic") {
+      pinocchio::computeMinverse(model_, data_, q_pin);
+      Mx_inv_.noalias() = J * data_.Minv * J.transpose();
+      Mx_ = pseudo_inverse(Mx_inv_);
+    }
 
-    pinocchio::computeMinverse(model_, data_, q_pin);
-    auto Mx_inv = J * data_.Minv * J.transpose();
-    auto Mx = pseudo_inverse(Mx_inv);
-
-    tau_task << J.transpose() * Mx * (stiffness * error - damping * (J * dq));
+    tau_task.noalias() = J.transpose() * Mx_ * (stiffness * error - damping * (J * dq));
   } else {
-    tau_task << J.transpose() * (stiffness * error - damping * (J * dq));
+    tau_task.noalias() = J.transpose() * (stiffness * error - damping * (J * dq));
   }
 
   if (model_.nq != model_.nv) {
@@ -161,30 +161,33 @@ CartesianController::update(const rclcpp::Time &time,
   tau_secondary << nullspace_stiffness * (q_ref - q) +
                        nullspace_damping * (dq_ref - dq);
 
-  tau_nullspace << nullspace_projection * tau_secondary;
+  tau_nullspace.noalias() = nullspace_projection * tau_secondary;
   tau_nullspace = tau_nullspace.cwiseMin(params_.nullspace.max_tau)
                       .cwiseMax(-params_.nullspace.max_tau);
 
-  tau_friction = params_.use_friction ? get_friction(dq, fp1, fp2, fp3)
-                                      : Eigen::VectorXd::Zero(model_.nv);
-
+  if (params_.use_friction) {
+    tau_friction = get_friction(dq, fp1, fp2, fp3);
+  } else {
+    tau_friction.setZero();
+  }
 
   if (params_.use_coriolis_compensation) {
     pinocchio::computeAllTerms(model_, data_, q_pin, dq);
-    tau_coriolis =
-        pinocchio::computeCoriolisMatrix(model_, data_, q_pin, dq) * dq;
+    tau_coriolis.noalias() = pinocchio::computeCoriolisMatrix(model_, data_, q_pin, dq) * dq;
   } else {
-    tau_coriolis = Eigen::VectorXd::Zero(model_.nv);
+    tau_coriolis.setZero();
   }
 
-  tau_gravity = params_.use_gravity_compensation
-                    ? pinocchio::computeGeneralizedGravity(model_, data_, q_pin)
-                    : Eigen::VectorXd::Zero(model_.nv);
+  if (params_.use_gravity_compensation) {
+    tau_gravity = pinocchio::computeGeneralizedGravity(model_, data_, q_pin);
+  } else {
+    tau_gravity.setZero();
+  }
 
-  tau_wrench << J.transpose() * target_wrench_;
+  tau_wrench.noalias() = J.transpose() * target_wrench_;
 
-  tau_d << tau_task + tau_nullspace + tau_friction + tau_coriolis +
-               tau_gravity + tau_joint_limits + tau_wrench;
+  tau_d.noalias() = tau_task + tau_nullspace + tau_friction + tau_coriolis +
+                    tau_gravity + tau_joint_limits + tau_wrench;
 
   if (params_.limit_torques) {
     tau_d = saturateTorqueRate(tau_d, tau_previous, params_.max_delta_tau);
@@ -308,6 +311,12 @@ CallbackReturn CartesianController::on_configure(
   tau_previous = Eigen::VectorXd::Zero(model_.nv);
   J = Eigen::MatrixXd::Zero(6, model_.nv);
 
+  // Pre-allocate matrices to avoid dynamic allocation in update()
+  J_pinv_ = Eigen::MatrixXd::Zero(model_.nv, 6);
+  Id_nv_ = Eigen::MatrixXd::Identity(model_.nv, model_.nv);
+  Mx_ = Eigen::MatrixXd::Zero(6, 6);
+  Mx_inv_ = Eigen::MatrixXd::Zero(6, 6);
+
   // Pre-compute joint IDs to avoid string lookup in update()
   joint_ids_.clear();
   joint_ids_.reserve(params_.joints.size());
@@ -315,10 +324,15 @@ CallbackReturn CartesianController::on_configure(
     joint_ids_.push_back(model_.getJointId(joint_name));
   }
 
-  // Map the friction parameters to Eigen vectors
-  fp1 = Eigen::Map<Eigen::VectorXd>(params_.friction.fp1.data(), model_.nv);
-  fp2 = Eigen::Map<Eigen::VectorXd>(params_.friction.fp2.data(), model_.nv);
-  fp3 = Eigen::Map<Eigen::VectorXd>(params_.friction.fp3.data(), model_.nv);
+  // Copy friction parameters to Eigen vectors (safer than Map)
+  fp1 = Eigen::VectorXd::Zero(model_.nv);
+  fp2 = Eigen::VectorXd::Zero(model_.nv);
+  fp3 = Eigen::VectorXd::Zero(model_.nv);
+  for (size_t i = 0; i < std::min(params_.friction.fp1.size(), static_cast<size_t>(model_.nv)); ++i) {
+    fp1[i] = params_.friction.fp1[i];
+    fp2[i] = params_.friction.fp2[i];
+    fp3[i] = params_.friction.fp3[i];
+  }
 
   nullspace_stiffness = Eigen::MatrixXd::Zero(model_.nv, model_.nv);
   nullspace_damping = Eigen::MatrixXd::Zero(model_.nv, model_.nv);
