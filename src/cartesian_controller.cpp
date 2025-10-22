@@ -58,7 +58,7 @@ CartesianController::update(const rclcpp::Time &time,
 
     // Use pre-computed joint IDs (cached in on_configure)
     auto joint_id = joint_ids_[i];
-    auto joint = model_.joints[joint_id];
+    const auto& joint = model_.joints[joint_id];
 
     q[i] = state_interfaces_[i].get_value();
     if (continous_joint_types.count(
@@ -341,17 +341,9 @@ CallbackReturn CartesianController::on_configure(
   new_target_joint_ = false;
   new_target_wrench_ = false;
 
-  multiple_publishers_detected_ = false;
-  max_allowed_publishers_ = 1;
-
   auto target_pose_callback =
     [this](const std::shared_ptr<geometry_msgs::msg::PoseStamped> msg) -> void
   {
-    if (!check_topic_publisher_count("target_pose")) {
-      RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1000,
-                           "Ignoring target_pose message due to multiple publishers detected!");
-      return;
-    }
     target_pose_buffer_.writeFromNonRT(msg);
     new_target_pose_ = true;
   };
@@ -359,11 +351,6 @@ CallbackReturn CartesianController::on_configure(
   auto target_joint_callback =
     [this](const std::shared_ptr<sensor_msgs::msg::JointState> msg) -> void
   {
-    if (!check_topic_publisher_count("target_joint")) {
-      RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1000,
-                           "Ignoring target_joint message due to multiple publishers detected!");
-      return;
-    }
     target_joint_buffer_.writeFromNonRT(msg);
     new_target_joint_ = true;
   };
@@ -371,11 +358,6 @@ CallbackReturn CartesianController::on_configure(
   auto target_wrench_callback =
     [this](const std::shared_ptr<geometry_msgs::msg::WrenchStamped> msg) -> void
   {
-    if (!check_topic_publisher_count("target_wrench")) {
-      RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1000,
-                           "Ignoring target_wrench message due to multiple publishers detected!");
-      return;
-    }
     target_wrench_buffer_.writeFromNonRT(msg);
     new_target_wrench_ = true;
   };
@@ -462,7 +444,7 @@ CallbackReturn CartesianController::on_activate(
 
     // Use pre-computed joint IDs (cached in on_configure)
     auto joint_id = joint_ids_[i];
-    auto joint = model_.joints[joint_id];
+    const auto& joint = model_.joints[joint_id];
 
     q[i] = state_interfaces_[i].get_value();
     if (joint.shortname() == "JointModelRZ") { // simple revolute joint case
@@ -502,6 +484,9 @@ CartesianController::on_deactivate(
 
 void CartesianController::parse_target_pose_() {
   auto msg = *target_pose_buffer_.readFromRT();
+  if (!msg) {
+    return;
+  }
   target_position_ << msg->pose.position.x, msg->pose.position.y,
       msg->pose.position.z;
   target_orientation_ =
@@ -511,14 +496,16 @@ void CartesianController::parse_target_pose_() {
 
 void CartesianController::parse_target_joint_() {
   auto msg = *target_joint_buffer_.readFromRT();
-  if (msg->position.size()) {
-    for (size_t i = 0; i < msg->position.size(); ++i) {
+  if (msg && msg->position.size()) {
+    size_t num_positions = std::min(msg->position.size(), static_cast<size_t>(model_.nv));
+    for (size_t i = 0; i < num_positions; ++i) {
       q_ref[i] = msg->position[i];
     }
     /*filterJointValues(msg->name, msg->position, params_.joints, q_ref);*/
   }
-  if (msg->velocity.size()) {
-    for (size_t i = 0; i < msg->position.size(); ++i) {
+  if (msg && msg->velocity.size()) {
+    size_t num_velocities = std::min(msg->velocity.size(), static_cast<size_t>(model_.nv));
+    for (size_t i = 0; i < num_velocities; ++i) {
       dq_ref[i] = msg->velocity[i];
     }
     /*filterJointValues(msg->name, msg->velocity, params_.joints, dq_ref);*/
@@ -527,6 +514,9 @@ void CartesianController::parse_target_joint_() {
 
 void CartesianController::parse_target_wrench_() {
   auto msg = *target_wrench_buffer_.readFromRT();
+  if (!msg) {
+    return;
+  }
   target_wrench_ << msg->wrench.force.x, msg->wrench.force.y, msg->wrench.force.z,
                     msg->wrench.torque.x, msg->wrench.torque.y, msg->wrench.torque.z;
 }
@@ -644,35 +634,6 @@ void CartesianController::log_debug_info(const rclcpp::Time &time) {
           "Control loop needed: "
               << (t_end.nanoseconds() - time.nanoseconds()) * 1e-6 << " ms");
     }
-}
-
-bool CartesianController::check_topic_publisher_count(const std::string& topic_name) {
-  auto topic_info = get_node()->get_publishers_info_by_topic(topic_name);
-  size_t publisher_count = topic_info.size();
-  
-  if (publisher_count > max_allowed_publishers_) {
-    RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 2000,
-                         "Topic '%s' has %zu publishers (expected max: %zu). Multiple command sources detected!",
-                         topic_name.c_str(), publisher_count, max_allowed_publishers_);
-    
-    if (!multiple_publishers_detected_) {
-      RCLCPP_ERROR(get_node()->get_logger(),
-                   "SAFETY WARNING: Multiple publishers detected on topic '%s'! "
-                   "Ignoring commands from this topic to prevent conflicting control signals.",
-                   topic_name.c_str());
-      multiple_publishers_detected_ = true;
-    }
-    return false;
-  }
-  
-  if (multiple_publishers_detected_ && publisher_count <= max_allowed_publishers_) {
-    RCLCPP_INFO(get_node()->get_logger(),
-                "Publisher conflict resolved on topic '%s'. Resuming message processing.",
-                topic_name.c_str());
-    multiple_publishers_detected_ = false;
-  }
-  
-  return true;
 }
 
 } // namespace crisp_controllers

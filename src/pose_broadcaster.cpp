@@ -38,13 +38,13 @@ PoseBroadcaster::update(const rclcpp::Time &time,
                                    const rclcpp::Duration & /*period*/) {
 
   size_t num_joints = params_.joints.size();
-  Eigen::VectorXd q_pin = Eigen::VectorXd::Zero(model_.nq);
+  q_pin.setZero();
 
   for (size_t i = 0; i < num_joints; i++) {
 
-    auto joint_name = params_.joints[i];
+    const auto& joint_name = params_.joints[i];
     auto joint_id = model_.getJointId(joint_name);
-    auto joint = model_.joints[joint_id];
+    const auto& joint = model_.joints[joint_id];
 
     q[i] = state_interfaces_[i].get_value();
     if (continous_joint_types.count(joint.shortname())) {  // Then we are handling a continous joint that is SO(2)
@@ -58,16 +58,14 @@ PoseBroadcaster::update(const rclcpp::Time &time,
   pinocchio::forwardKinematics(model_, data_, q_pin);
   pinocchio::updateFramePlacements(model_, data_);
 
-  auto current_pose = data_.oMf[end_effector_frame_id];
-  auto current_quaternion =
-      Eigen::Quaterniond(current_pose.rotation());
+  const auto& current_pose = data_.oMf[end_effector_frame_id];
+  current_quaternion_ = Eigen::Quaterniond(current_pose.rotation());
 
   // Decide whether to publish the pose or not
   bool should_publish = true;
   if (params_.publish_frequency > 0.0) {
     auto time_since_last = time - last_publish_time_;
-    auto min_interval = rclcpp::Duration::from_seconds(1.0 / params_.publish_frequency);
-    should_publish = time_since_last >= min_interval;
+    should_publish = time_since_last >= min_publish_interval_;
   }
 
   if (should_publish && realtime_pose_publisher_ && realtime_pose_publisher_->trylock())
@@ -79,10 +77,10 @@ PoseBroadcaster::update(const rclcpp::Time &time,
     pose_msg.pose.position.x = current_pose.translation()[0];
     pose_msg.pose.position.y = current_pose.translation()[1];
     pose_msg.pose.position.z = current_pose.translation()[2];
-    pose_msg.pose.orientation.x = current_quaternion.x();
-    pose_msg.pose.orientation.y = current_quaternion.y();
-    pose_msg.pose.orientation.z = current_quaternion.z();
-    pose_msg.pose.orientation.w = current_quaternion.w();
+    pose_msg.pose.orientation.x = current_quaternion_.x();
+    pose_msg.pose.orientation.y = current_quaternion_.y();
+    pose_msg.pose.orientation.z = current_quaternion_.z();
+    pose_msg.pose.orientation.w = current_quaternion_.w();
     realtime_pose_publisher_->unlockAndPublish();
     last_publish_time_ = time;
   }
@@ -161,6 +159,13 @@ CallbackReturn PoseBroadcaster::on_configure(
 
   end_effector_frame_id = model_.getFrameId(params_.end_effector_frame);
   q = Eigen::VectorXd::Zero(model_.nv);
+  q_pin = Eigen::VectorXd::Zero(model_.nq);
+  current_quaternion_ = Eigen::Quaterniond::Identity();
+
+  // Pre-compute min publish interval to avoid division in update loop
+  if (params_.publish_frequency > 0.0) {
+    min_publish_interval_ = rclcpp::Duration::from_seconds(1.0 / params_.publish_frequency);
+  }
 
   pose_publisher_ = get_node()->create_publisher<geometry_msgs::msg::PoseStamped>(
           "current_pose", rclcpp::SystemDefaultsQoS());
