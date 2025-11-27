@@ -4,8 +4,13 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <binders.h>
 #include <cassert>
+#include <chrono>
 #include <cmath>
+#include <future>
 #include <memory>
+#include <optional>
+#include <unordered_set>
+#include <vector>
 #include <pinocchio/algorithm/frames.hxx>
 #include <pinocchio/algorithm/kinematics.hpp>
 #include <pinocchio/algorithm/model.hpp>
@@ -101,19 +106,62 @@ CallbackReturn PoseBroadcaster::on_init() {
 CallbackReturn PoseBroadcaster::on_configure(
     const rclcpp_lifecycle::State & /*previous_state*/) {
 
-  auto parameters_client = std::make_shared<rclcpp::AsyncParametersClient>(
-      get_node(), "robot_state_publisher");
-  parameters_client->wait_for_service();
+  const auto logger = get_node()->get_logger();
+  const auto service_timeout = 2s;
+  const auto param_timeout = 2s;
 
-  auto future = parameters_client->get_parameters({"robot_description"});
-  auto result = future.get();
+  auto fetch_robot_description =
+      [&](const std::string &target_node) -> std::optional<std::string> {
+        if (target_node.empty()) {
+          return std::nullopt;
+        }
+
+        auto parameters_client = std::make_shared<rclcpp::AsyncParametersClient>(
+            get_node(), target_node);
+        if (!parameters_client->wait_for_service(service_timeout)) {
+          RCLCPP_WARN(logger,
+                      "Parameters service '%s' not available after %.1f seconds",
+                      target_node.c_str(),
+                      std::chrono::duration<double>(service_timeout).count());
+          return std::nullopt;
+        }
+
+        auto future = parameters_client->get_parameters(
+            {params_.robot_description_parameter});
+        if (future.wait_for(param_timeout) != std::future_status::ready) {
+          RCLCPP_WARN(logger,
+                      "Timed out waiting for '%s' parameter '%s'",
+                      target_node.c_str(),
+                      params_.robot_description_parameter.c_str());
+          return std::nullopt;
+        }
+
+        auto result = future.get();
+        if (result.empty()) {
+          return std::nullopt;
+        }
+        return result[0].value_to_string();
+      };
 
   std::string robot_description_;
-  if (!result.empty()) {
-    robot_description_ = result[0].value_to_string();
-  } else {
-    RCLCPP_ERROR(get_node()->get_logger(),
-                 "Failed to get robot_description parameter.");
+  std::vector<std::string> parameter_targets = {
+      params_.robot_description_node,
+      "robot_state_publisher",
+      "/robot_state_publisher"};
+  std::unordered_set<std::string> tried_targets;
+  for (const auto &target : parameter_targets) {
+    if (target.empty() || !tried_targets.insert(target).second) {
+      continue;
+    }
+    auto description = fetch_robot_description(target);
+    if (description) {
+      robot_description_ = *description;
+      break;
+    }
+  }
+
+  if (robot_description_.empty()) {
+    RCLCPP_ERROR(logger, "Failed to get robot_description parameter from any target");
     return CallbackReturn::ERROR;
   }
 

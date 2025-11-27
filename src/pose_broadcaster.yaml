@@ -13,3 +13,11 @@ pose_broadcaster:
     type: double
     default_value: 250.0
     description: "Publishing frequency in Hz (0.0 means no throttling)"
+  robot_description_node:
+    type: string
+    default_value: "/robot_state_publisher"
+    description: "Node (can be absolute) to query for the robot_description parameter"
+  robot_description_parameter:
+    type: string
+    default_value: "robot_description"
+    description: "Parameter name that holds the URDF"
