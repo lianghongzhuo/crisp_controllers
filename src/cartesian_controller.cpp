@@ -14,7 +14,7 @@
 #include <pinocchio/algorithm/rnea.hpp>
 #include <pinocchio/multibody/fwd.hpp>
 #include <pinocchio/parsers/urdf.hpp>
-#include <pinocchio/spatial/explog.hpp>
+#include <pinocchio/spatial.hpp>
 #include <pinocchio/spatial/fwd.hpp>
 
 #include "pinocchio/algorithm/model.hpp"

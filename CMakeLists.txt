@@ -124,6 +124,7 @@ target_link_libraries(${PROJECT_NAME}
     pose_broadcaster_parameters
     torque_feedback_controller_parameters
     twist_broadcaster_parameters
+    pinocchio::pinocchio
 )
 
 
